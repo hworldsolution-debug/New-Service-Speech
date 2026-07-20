@@ -1,29 +1,60 @@
 const express = require('express');
 const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
+const axios = require('axios'); // Stream read karne ke liye
 const app = express();
 
 app.use(express.json());
 
-// Deepgram client initialized with your Environment Variable
-const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
+// Deepgram client initialized with your API Key directly or via env
+const deepgram = createClient("dfa41e478a2cea22ed719b1e321e26af4fa91b41");
 
 app.post('/stream-transcribe', async (req, res) => {
     try {
-        const { audioUrl } = req.body; // Kisi bhi live stream ya audio file ka URL
+        const { audioUrl } = req.body; 
         if (!audioUrl) {
             return res.status(400).json({ error: 'Missing audioUrl in request body' });
         }
 
-        // Live connection setup matching nova model preferences
+        // 1. Live connection setup
         const connection = deepgram.listen.live({
-            model: 'nova-2', // Stable generation model
+            model: 'nova-2',
             language: 'en',
             smart_format: true,
         });
 
         let finalTranscript = '';
+        let responseSent = false;
 
-        // Jab Deepgram live data ka result wapas bhejega
+        connection.on(LiveTranscriptionEvents.Open, async () => {
+            console.log('Deepgram connection opened. Fetching audio stream...');
+            try {
+                // Audio URL se live data stream download karna shuru karein
+                const response = await axios({
+                    method: 'get',
+                    url: audioUrl,
+                    responseType: 'stream'
+                });
+
+                // Data chunks ko receive karke Deepgram ko send karna
+                response.data.on('data', (chunk) => {
+                    if (connection.getReadyState() === 1) { // 1 means OPEN
+                        connection.send(chunk);
+                    }
+                });
+
+                response.data.on('end', () => {
+                    console.log('Audio stream ended.');
+                    setTimeout(() => {
+                        if (connection.getReadyState() === 1) connection.finish();
+                    }, 2000); // Thoda wait taaki bacha hua process ho jaye
+                });
+
+            } catch (streamError) {
+                console.error("Streaming Error:", streamError);
+                if (connection.getReadyState() === 1) connection.finish();
+            }
+        });
+
         connection.on(LiveTranscriptionEvents.Transcript, (data) => {
             const transcript = data.channel.alternatives[0].transcript;
             if (transcript) {
@@ -33,23 +64,23 @@ app.post('/stream-transcribe', async (req, res) => {
 
         connection.on(LiveTranscriptionEvents.Close, () => {
             console.log('Deepgram live connection closed.');
-            return res.json({ text: finalTranscript.trim() });
+            if (!responseSent) {
+                responseSent = true;
+                return res.json({ text: finalTranscript.trim() });
+            }
         });
 
         connection.on(LiveTranscriptionEvents.Error, (err) => {
             console.error('Deepgram Error:', err);
-            if (!res.headersSent) res.status(500).json({ error: 'Transcription failed' });
+            if (!responseSent) {
+                responseSent = true;
+                return res.status(500).json({ error: 'Transcription failed' });
+            }
         });
-
-        // Simulating the stream input processing safely
-        // Real-time implementations close stream dynamically based on payload structure
-        setTimeout(() => {
-            connection.finish();
-        }, 8000); // 8 seconds buffer logic for fast response
 
     } catch (error) {
         console.error("Server Error:", error);
-        if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
 
